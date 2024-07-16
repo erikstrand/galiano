@@ -1,0 +1,6 @@
+*.egg-info
+*.swo
+*.swp
+.DS_Store
+.venv*
+__pycache__
