@@ -9,7 +9,7 @@ npz_small_dir = Path("data/npz_small")
 
 
 class PointCloudVis:
-    def __init__(self):
+    def __init__(self, ground_points, tree_points):
         self.canvas = WgpuCanvas(size=(1200, 800))
         self.renderer = gfx.renderers.WgpuRenderer(self.canvas)
         self.scene = gfx.Scene()
@@ -25,6 +25,23 @@ class PointCloudVis:
 
         self.ambient_light = gfx.AmbientLight()
         self.scene.add(self.ambient_light)
+
+        self.add_points(ground_points, (0.0, 0.0, 1.0))
+        self.add_points(tree_points, (0.0, 1.0, 0.0))
+
+        self.grid = gfx.Grid(
+            None,
+            gfx.GridMaterial(
+                major_step=0.1,
+                thickness_space="world",
+                major_thickness=0.002,
+                infinite=True,
+            ),
+            orientation="xy",
+        )
+        # self.grid.local.y = -10
+        self.scene.add(self.grid)
+
 
     def add_points(self, points, color):
         n_points = points.shape[0]
@@ -52,9 +69,7 @@ def main():
     print(f"{n_tree_points} tree points")
     print(f"{n_ground_points} ground points")
 
-    vis = PointCloudVis()
-    vis.add_points(tree_points, (0.0, 1.0, 0.0))
-    vis.add_points(ground_points, (0.0, 0.0, 1.0))
+    vis = PointCloudVis(ground_points, tree_points)
     vis.run()
 
 
