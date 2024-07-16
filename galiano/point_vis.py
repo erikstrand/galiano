@@ -3,6 +3,8 @@ from wgpu.gui.auto import WgpuCanvas, run
 import numpy as np
 import pygfx as gfx
 
+from lat_lon import lat_lon_alt_to_cartesian
+
 
 # npz_dir = Path("data/npz")
 npz_small_dir = Path("data/npz_small")
@@ -14,11 +16,15 @@ class PointCloudVis:
         self.renderer = gfx.renderers.WgpuRenderer(self.canvas)
         self.scene = gfx.Scene()
 
+        # This will be used to position the view rendering camera.
+        # ref_lat_lon = np.array([48.875, -123.325])
+        # viewer_lat_lon_alt = np.array([48.875, -123.325, 1.0]).reshape(1, 3)
+        # viewer_xyz = lat_lon_alt_to_cartesian(viewer_lat_lon_alt, ref_lat_lon)
         # self.axes = gfx.AxesHelper(size=1, thickness=2)
+        # self.axes.world.position = viewer_xyz
         # self.scene.add(self.axes)
 
         self.camera = gfx.PerspectiveCamera(fov=60, aspect=1, depth_range=(0.1, 1000.0))
-        # self.camera.show_object(self.axes, up=(0, 0, 1))
         self.controller = gfx.OrbitController(
             self.camera, register_events=self.renderer
         )
@@ -39,7 +45,6 @@ class PointCloudVis:
             ),
             orientation="xy",
         )
-        # self.grid.local.y = -10
         self.scene.add(self.grid)
 
 
