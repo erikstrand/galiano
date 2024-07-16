@@ -5,7 +5,7 @@ LAZ_DIR = data/laz
 NPZ_DIR = data/npz
 
 # Python script to run
-SCRIPT = laz_to_lat_lon.py
+SCRIPT = laz_to_xyz.py
 
 # Find all .laz files in the LAZ_DIR
 LAZ_FILES = $(wildcard $(LAZ_DIR)/*.laz)
