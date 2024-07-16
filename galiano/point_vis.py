@@ -13,13 +13,14 @@ def lat_lon_alt_to_cartesian(lat_lon_alt, ref_lat_lon):
     e2 = 6.69437999014e-3  # Square of eccentricity
 
     # Split the input array into lat, lon, and alt
-    lat = lat_lon_alt[:, 0]
-    lon = lat_lon_alt[:, 1]
+    lat = lat_lon_alt[:, 1]
+    lon = lat_lon_alt[:, 0]
     alt = lat_lon_alt[:, 2]
 
     # Convert degrees to radians
     lat_rad = np.radians(lat)
     lon_rad = np.radians(lon)
+    ref_lat_lon = np.flip(ref_lat_lon)
     ref_lat_rad = np.radians(ref_lat_lon[0])
     ref_lon_rad = np.radians(ref_lat_lon[1])
 
