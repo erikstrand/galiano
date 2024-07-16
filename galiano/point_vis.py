@@ -44,10 +44,12 @@ class PointCloudVis:
 
 def main():
     print("Loading points...")
-    points = np.load(npz_dir / "bc_092b084_3_2_3_xyes_8_utm10_2019.npz")["points"]
-    # points = np.load(npz_dir / "bc_092b084_3_2_4_xyes_8_utm10_2019.npz")["points"]
-    # points = np.load(npz_dir / "bc_092b084_3_4_1_xyes_8_utm10_2019.npz")["points"]
-    # points = np.load(npz_dir / "bc_092b084_3_4_2_xyes_8_utm10_2019.npz")["points"]
+    # ll = lower left, lr = lower right, ul = upper left, ur = upper right
+    points_ll = np.load(npz_dir / "bc_092b084_3_2_3_xyes_8_utm10_2019.npz")["points"]
+    points_lr = np.load(npz_dir / "bc_092b084_3_2_4_xyes_8_utm10_2019.npz")["points"]
+    points_ul = np.load(npz_dir / "bc_092b084_3_4_1_xyes_8_utm10_2019.npz")["points"]
+    points_ur = np.load(npz_dir / "bc_092b084_3_4_2_xyes_8_utm10_2019.npz")["points"]
+    points = np.concatenate([points_ll, points_lr, points_ul, points_ur])
     n_points = points.shape[0]
     print(f"Loaded {n_points} points.")
     print(points.dtype)
