@@ -51,7 +51,7 @@ def utm_to_lat_long(utm_points):
         utm_x, utm_y = utm_points[i, :2]
         lat_lon_points[i, :2] = transformer.transform(utm_x, utm_y)
     lat_lon_points[:, 2] = utm_points[:, 2]
-    return lat_lon_points
+    return lat_lon_points.astype(np.float32)
 
 
 @click.command()
