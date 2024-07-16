@@ -13,14 +13,13 @@ def lat_lon_alt_to_cartesian(lat_lon_alt, ref_lat_lon):
     e2 = 6.69437999014e-3  # Square of eccentricity
 
     # Split the input array into lat, lon, and alt
-    lat = lat_lon_alt[:, 1]
-    lon = lat_lon_alt[:, 0]
+    lat = lat_lon_alt[:, 0]
+    lon = lat_lon_alt[:, 1]
     alt = lat_lon_alt[:, 2]
 
     # Convert degrees to radians
     lat_rad = np.radians(lat)
     lon_rad = np.radians(lon)
-    ref_lat_lon = np.flip(ref_lat_lon)
     ref_lat_rad = np.radians(ref_lat_lon[0])
     ref_lon_rad = np.radians(ref_lat_lon[1])
 
@@ -68,11 +67,11 @@ class PointCloudVis:
         self.renderer = gfx.renderers.WgpuRenderer(self.canvas)
         self.scene = gfx.Scene()
 
-        self.axes = gfx.AxesHelper(size=1, thickness=2)
-        self.scene.add(self.axes)
+        # self.axes = gfx.AxesHelper(size=1, thickness=2)
+        # self.scene.add(self.axes)
 
         self.camera = gfx.PerspectiveCamera(fov=60, aspect=1, depth_range=(0.1, 1000.0))
-        self.camera.show_object(self.axes, up=(0, 0, 1))
+        # self.camera.show_object(self.axes, up=(0, 0, 1))
         self.controller = gfx.OrbitController(
             self.camera, register_events=self.renderer
         )
@@ -87,6 +86,7 @@ class PointCloudVis:
         material = gfx.PointsMaterial(color=(1, 0, 0), size=0.75)
         points = gfx.Points(geometry, material)
         self.scene.add(points)
+        self.camera.show_object(points, up=(0, 0, 1))
 
     def animate(self):
         self.renderer.render(self.scene, self.camera)
@@ -100,6 +100,8 @@ def main():
     print("Loading points...")
     points = np.load(npz_dir / "bc_092b084_3_4_2_xyes_8_utm10_2019.npz")["points"]
     n_points = points.shape[0]
+    # Switch from lon/lat to lat/lon
+    points = points[:, [1, 0, 2]]
     print(f"Loaded {n_points} points.")
     print(points.dtype)
     mins = np.min(points, axis=0)

@@ -38,7 +38,7 @@ def load_laz_points(laz_file):
     return points
 
 
-def utm_to_lat_long(utm_points):
+def utm_to_lon_lat(utm_points):
     # Define the UTM Zone 10N CRS
     utm_crs = pyproj.CRS("EPSG:3157")  # NAD83(CSRS) / UTM zone 10N
     wgs84_crs = pyproj.CRS("EPSG:4326")  # WGS84 (latitude and longitude)
@@ -46,12 +46,12 @@ def utm_to_lat_long(utm_points):
     # Define a transformer to convert UTM to WGS84
     transformer = pyproj.Transformer.from_crs(utm_crs, wgs84_crs, always_xy=True)
 
-    lat_lon_points = np.zeros_like(utm_points)
+    lon_lat_points = np.zeros_like(utm_points)
     for i in tqdm(range(utm_points.shape[0])):
         utm_x, utm_y = utm_points[i, :2]
-        lat_lon_points[i, :2] = transformer.transform(utm_x, utm_y)
-    lat_lon_points[:, 2] = utm_points[:, 2]
-    return lat_lon_points.astype(np.float32)
+        lon_lat_points[i, :2] = transformer.transform(utm_x, utm_y)
+    lon_lat_points[:, 2] = utm_points[:, 2]
+    return lon_lat_points.astype(np.float32)
 
 
 @click.command()
@@ -64,11 +64,11 @@ def main(input, output):
     print("")
 
     print("Converting UTM to Latitude and Longitude...")
-    lat_lon_points = utm_to_lat_long(utm_points)
+    lon_lat_points = utm_to_lon_lat(utm_points)
     print("")
 
     print(f"Saving to {output}...")
-    np.savez(output, points=lat_lon_points)
+    np.savez(output, points=lon_lat_points)
     print("Done.")
 
 
