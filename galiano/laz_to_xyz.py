@@ -13,37 +13,38 @@ def load_laz_points(laz_file, verbose):
         las = fh.read()
         header = las.header
 
-        if verbose:
-            # Print coordinate system data.
-            print("Coordinate Reference System (CRS):", header.vlrs)
-            # Extracting WKT from the WktCoordinateSystemVlr
-            crs_vlr = None
-            for vlr in header.vlrs:
-                if isinstance(vlr, laspy.vlrs.known.WktCoordinateSystemVlr):
-                    crs_vlr = vlr
-                    break
-            if crs_vlr:
-                print("WKT CRS Information:", crs_vlr.string)
+    if verbose:
+        # Print coordinate system data.
+        print("Coordinate Reference System (CRS):", header.vlrs)
+        # Extracting WKT from the WktCoordinateSystemVlr
+        crs_vlr = None
+        for vlr in header.vlrs:
+            if isinstance(vlr, laspy.vlrs.known.WktCoordinateSystemVlr):
+                crs_vlr = vlr
+                break
+        if crs_vlr:
+            print("WKT CRS Information:", crs_vlr.string)
 
-            print("X Offset:", header.x_offset)
-            print("Y Offset:", header.y_offset)
-            print("Z Offset:", header.z_offset)
-            print("X Scale Factor:", header.x_scale)
-            print("Y Scale Factor:", header.y_scale)
-            print("Z Scale Factor:", header.z_scale)
+        print("X Offset:", header.x_offset)
+        print("Y Offset:", header.y_offset)
+        print("Z Offset:", header.z_offset)
+        print("X Scale Factor:", header.x_scale)
+        print("Y Scale Factor:", header.y_scale)
+        print("Z Scale Factor:", header.z_scale)
 
-            # Print point format data.
-            print("Available dimensions in the LAZ file:")
-            point_format = las.point_format
-            for dimension in point_format.dimension_names:
-                print(dimension)
+        # Print point format data.
+        print("Available dimensions in the LAZ file:")
+        point_format = las.point_format
+        for dimension in point_format.dimension_names:
+            print(dimension)
+        print("")
 
-        # Apply scale factors and offsets
-        raw_points = np.array([las.X, las.Y, las.Z]).T
-        real_x = raw_points[:, 0] * header.x_scale + header.x_offset
-        real_y = raw_points[:, 1] * header.y_scale + header.y_offset
-        real_z = raw_points[:, 2] * header.z_scale + header.z_offset
-        points = np.vstack((real_x, real_y, real_z)).T
+    # Apply scale factors and offsets
+    raw_points = np.array([las.X, las.Y, las.Z]).T
+    real_x = raw_points[:, 0] * header.x_scale + header.x_offset
+    real_y = raw_points[:, 1] * header.y_scale + header.y_offset
+    real_z = raw_points[:, 2] * header.z_scale + header.z_offset
+    points = np.vstack((real_x, real_y, real_z)).T
 
     return points
 
