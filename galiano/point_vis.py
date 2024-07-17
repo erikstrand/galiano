@@ -8,6 +8,7 @@ import jax.numpy as jnp
 from lat_lon import lat_lon_alt_to_cartesian
 from quantization import make_bin_def, get_bin_index, dequantize
 from spatial_sort import make_spatial_sort, insert_points_dense, find_nearest_neighbor
+from image_io import write_array_as_image
 
 
 # npz_dir = Path("data/npz")
@@ -51,27 +52,138 @@ def signed_distance_point_to_line(point, line_point, line_direction):
     return signed_distance
 
 
-def render_splats(points, viewer_xyz, viewer_frame, viewer_fov_x, viewer_fov_y, near, far):
+def splat_tile(
+    tile_size: tuple[int, int],  # static (16, 16)
+    tile_bounds: jax.Array,  # [[x_min, y_min], [x_max, y_max]] in the projection plane
+    means: jax.Array,  # shape (max_splats, 2), in projected space
+    variances: jax.Array,  # shape (max_splats,), in projected space
+):
+    print(f"tile bounds {tile_bounds}")
+    print(means.shape)
+    print(variances.shape)
+
+    n_splats = means.shape[0]
+    print(f"{n_splats} splats")
+    assert means.shape == (n_splats, 2)
+    assert variances.shape == (n_splats,)
+    assert tile_bounds.shape == (2, 2)
+
+    # Construct pixel positions in the projection plane (z = 1).
+    pixel_size = (tile_bounds[1] - tile_bounds[0]) / jnp.array(tile_size)
+    pixel_x = jnp.linspace(
+        tile_bounds[0, 0], tile_bounds[1, 0], tile_size[0], endpoint=False
+    )
+    pixel_y = jnp.linspace(
+        tile_bounds[0, 1], tile_bounds[1, 1], tile_size[1], endpoint=False
+    )
+    pixel_x = pixel_x + 0.5 * pixel_size[0]
+    pixel_y = pixel_y + 0.5 * pixel_size[1]
+    pixel_x, pixel_y = jnp.meshgrid(pixel_x, pixel_y, indexing="ij")
+    pixel_xy = jnp.stack([pixel_x, pixel_y], axis=-1)
+    assert pixel_xy.shape == (tile_size[0], tile_size[1], 2)
+
+    # Initialize buffers.
+    rgba_buffer = jnp.zeros(tile_size + (4,), dtype=jnp.float32)
+
+    base_color = jnp.array([0.5, 0.2, 0.1, 1.0])
+
+    # Work through the splats from front to back.
+    for i in range(n_splats):
+        mean = means[i]
+        variance = variances[i]
+        print(f"mean: {mean}")
+        print(f"variance: {variance}")
+
+        # Compute the distance from the mean to each pixel.
+        distance = jnp.linalg.norm(pixel_xy - mean, axis=-1)
+        assert distance.shape == tile_size
+
+        # Compute the alpha for each pixel.
+        # Clip to zero after 2 standard deviations.
+        alpha = jnp.exp(-0.5 * distance**2 / variance)
+        alpha = jnp.where(distance < 2.0 * jnp.sqrt(variance), alpha, 0.0)
+        assert alpha.shape == tile_size
+
+        # Premultiply the color by the alpha.
+        color = base_color * alpha[:, :, None]
+        assert color.shape == tile_size + (4,)
+
+        # Update the buffers. We use the formula R = S + D * (1 - S_A), where R is RGBA for the
+        # result, S is RGBA for the source (top layer), and D is RGBA for the destination (bottom
+        # layer). S_A refers to the alpha channel of the source. This formula assumes that the RGB
+        # components have been multiplied by the alpha channel.
+        s_alpha = rgba_buffer[..., 3, None]
+        rgba_buffer = rgba_buffer + color * (1.0 - s_alpha)
+
+        # Exit if all pixels have converged.
+        if jnp.all(rgba_buffer[..., 3] > 0.999):
+            print("break")
+            break
+
+    # TODO Do I divide by alpha?
+    return rgba_buffer
+
+
+def render_splats(
+    points,
+    viewer_xyz,
+    viewer_frame,
+    viewer_fov_x,
+    viewer_fov_y,
+    near,
+    far,
+    splat_radius,
+):
     # Convert points to camera space.
-    ground_points_camera = jnp.einsum("ij,kj->ki", viewer_frame, points - viewer_xyz)
+    points = jnp.einsum("ij,kj->ki", viewer_frame, points - viewer_xyz)
 
     # Convert points to projective space.
-    zs = ground_points_camera[:, 2][:, None]
-    ground_points_proj = jnp.concatenate([ground_points_camera[:, :2] / zs, zs], axis=1)
+    zs = points[:, 2][:, None]
+    points_proj = jnp.concatenate([points[:, :2] / zs, zs], axis=1)
 
-    # Clip.
+    # Clip. Note: Splats with centers outside the frustrum can still affect it. I need to account
+    # for this.
     fov_bound_x = jnp.tan(0.5 * viewer_fov_x)
     fov_bound_y = jnp.tan(0.5 * viewer_fov_y)
     mask = jnp.logical_and(
-        ground_points_proj[:, 0] >= -fov_bound_x,
-        ground_points_proj[:, 0] <= fov_bound_x,
+        points_proj[:, 0] >= -fov_bound_x,
+        points_proj[:, 0] <= fov_bound_x,
     )
-    mask = jnp.logical_and(mask, ground_points_proj[:, 1] >= -fov_bound_y)
-    mask = jnp.logical_and(mask, ground_points_proj[:, 1] <= fov_bound_y)
-    mask = jnp.logical_and(mask, ground_points_proj[:, 2] >= near)
-    mask = jnp.logical_and(mask, ground_points_proj[:, 2] <= far)
+    mask = jnp.logical_and(mask, points_proj[:, 1] >= -fov_bound_y)
+    mask = jnp.logical_and(mask, points_proj[:, 1] <= fov_bound_y)
+    mask = jnp.logical_and(mask, points_proj[:, 2] >= near)
+    mask = jnp.logical_and(mask, points_proj[:, 2] <= far)
+    points_proj = points_proj[mask]
+    print(f"n points in frustrum: {points_proj.shape[0]}")
 
-    return mask
+    # Sort.
+    order = jnp.argsort(points_proj[:, 2])
+    points_proj = points_proj[order]
+
+    # Compute screen space splat size. For now I'm assuming the splats are still circular after
+    # projection to the screen, which is approximately true if they are all aligned with the view
+    # direction. Later I should model the screen space splats as ellipses.
+    screen_splat_radii = splat_radius / points_proj[:, 2]
+
+    tile_size = (32, 32)
+    tile_view_bounds = jnp.array(
+        [
+            [-fov_bound_x, -fov_bound_y],
+            [fov_bound_x, fov_bound_y],
+        ]
+    )
+
+    # n_subset = 16
+    # means = points_proj[:n_subset, :2]
+    # variances = screen_splat_radii[:n_subset]**2
+
+    means = points_proj[:, :2]
+    variances = screen_splat_radii**2
+    image_rgba = splat_tile(tile_size, tile_view_bounds, means, variances)
+    print("image rgba", image_rgba)
+    image_rgb = image_rgba[..., :3]
+
+    return mask, image_rgb
 
 
 class PointCloudVis:
@@ -107,7 +219,6 @@ class PointCloudVis:
         )
         self.scene.add(self.grid)
 
-
     def add_points(self, points, color):
         points = points.astype(np.float32)
         n_points = points.shape[0]
@@ -137,7 +248,7 @@ def main():
     # print(indices)
 
     print("Loading points...")
-    tree_points=np.load(npz_small_dir / "tree_points.npz")["points"]
+    tree_points = np.load(npz_small_dir / "tree_points.npz")["points"]
     ground_points = np.load(npz_small_dir / "ground_points.npz")["points"]
     n_tree_points = tree_points.shape[0]
     n_ground_points = ground_points.shape[0]
@@ -162,24 +273,44 @@ def main():
     # Define the viewer orientation. X is left, Y is up, Z is forward. Note that it is a left
     # handed system. Here the first index identifies the vector of the frame, and the second is
     # the coordinate value in world space.
-    viewer_frame = jnp.array([
-        [0.0, -1.0, 0.0],
-        [0.0, 0.0, 1.0],
-        [1.0, 0.0, 0.0],
-    ])
+    viewer_frame = jnp.array(
+        [
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+        ]
+    )
 
-    image_size = (300, 200)
+    # For now I just have one tile.
+    image_size = (16, 16)
     aspect_ratio = image_size[1] / image_size[0]
     viewer_fov_x = 60.0 * (jnp.pi / 180.0)
     viewer_fov_y = viewer_fov_x * aspect_ratio
 
+    print("Rendering image...")
     near = 0.001
     far = 10.0
-    mask = render_splats(ground_points, viewer_xyz, viewer_frame, viewer_fov_x, viewer_fov_y, near, far)
+    splat_size = 0.001
+    mask, image = render_splats(
+        ground_points,
+        viewer_xyz,
+        viewer_frame,
+        viewer_fov_x,
+        viewer_fov_y,
+        near,
+        far,
+        splat_size,
+    )
+    print(image.shape)
+    print(jnp.min(image, axis=(0, 1)))
+    print(jnp.max(image, axis=(0, 1)))
+    image_path = "test.png"
+    print(f"Saving to {image_path}")
+    write_array_as_image(image, image_path)
 
-    ground_points = ground_points[mask]
-    vis = PointCloudVis(ground_points, tree_points)
-    vis.run()
+    # ground_points = ground_points[mask]
+    # vis = PointCloudVis(ground_points, tree_points)
+    # vis.run()
 
 
 if __name__ == "__main__":
