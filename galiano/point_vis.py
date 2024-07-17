@@ -25,7 +25,7 @@ def build_spatial_sort(points, dx=0.01):
     return bin_def, spatial_sort
 
 
-def distance_point_to_line(point, line_point, line_direction):
+def signed_distance_point_to_line(point, line_point, line_direction):
     """
     Computes the distance between a line and a point in 2D.
 
@@ -37,68 +37,81 @@ def distance_point_to_line(point, line_point, line_direction):
     Returns:
     - The distance between the point and the line.
     """
-    # Normalize the line direction
-    line_direction = line_direction / jnp.linalg.norm(line_direction)
+    # Rotate the line direction by 90 degrees counter-clockwise to get the perpendicular direction
+    perp_dir = jnp.array([line_direction[1], -line_direction[0]])
+
+    # Normalize the perpendicular direction
+    perp_dir = perp_dir / jnp.linalg.norm(perp_dir)
 
     # Compute the vector from the line point to the point
     point_vector = point - line_point
 
-    # Compute the projection of the point_vector onto the line_direction
-    projection_length = jnp.einsum("...i,i->...", point_vector, line_direction)
-    projection_vector = projection_length[..., None] * line_direction
-
-    # Compute the perpendicular vector
-    perpendicular_vector = point_vector - projection_vector
-
-    # Compute the distance as the norm of the perpendicular vector
-    distance = jnp.linalg.norm(perpendicular_vector, axis=-1)
-
-    return distance
+    # Compute the dot product of the point vector and the perpendicular direction
+    signed_distance = jnp.einsum("...i,i->...", point_vector, perp_dir)
+    return signed_distance
 
 
 class PointCloudVis:
     def __init__(self, ground_points, tree_points):
-        print("Building spatial sort...")
+        n_ground_points = ground_points.shape[0]
+        print("Building spatial sort for ground points...")
         bin_def, spatial_sort = build_spatial_sort(ground_points[:, :2])
-        print(f"n bins: {bin_def.n_bins}")
+        print(f"n bins: {bin_def.n_bins}, total bins: {bin_def.n_total_bins}")
         print(f"bin size: {bin_def.bin_size}")
         print(f"max bin occupancy: {jnp.max(spatial_sort.bin_counts)}")
+        print(spatial_sort.positions.shape)
+        print(spatial_sort.bins.shape)
         print("")
 
+        # Define the viewer position.
         viewer_xy = jnp.array([-0.54, -0.21])
-        viewer_dir = jnp.array([1.0, 0.0])
         index, distance = find_nearest_neighbor(spatial_sort, bin_def, viewer_xy)
         viewer_xyz = ground_points[index] + np.array([0.0, 0.0, 0.005])
 
-        print("grid")
+        # Define the viewer field of view.
+        viewer_dir = jnp.array([1.0, 0.0])
+        viewer_fov = 50.0 * (jnp.pi / 180.0)
+        viewer_ray_left = jnp.array([jnp.cos(viewer_fov / 2), jnp.sin(viewer_fov / 2)])
+        viewer_ray_right = jnp.array([jnp.cos(-viewer_fov / 2), jnp.sin(-viewer_fov / 2)])
+
+        # Compute the integer indices and XY coordinates of the corners of all bins.
+        # (Ok, almost all corners. We exclude corners on the boundary.)
         ranges = [np.arange(1, n) for n in bin_def.n_bins]
         mesh = np.meshgrid(*ranges, indexing='ij')
         corner_ij = jnp.array(np.stack(mesh, axis=-1).reshape(-1, bin_def.n_bins.size))
-        print(corner_ij.shape)
+        corner_xy = dequantize(corner_ij, bin_def)
+        n_corners = corner_ij.shape[0]
+        assert corner_ij.shape == (n_corners, 2)
+        assert corner_xy.shape == (n_corners, 2)
 
+        # Compute the bin coords of the bins that are adjacent to each corner.
+        # (This is why we excluded boundary corners. They would have less than four neighbors.)
         offsets = np.array([[-1, -1], [0, -1], [-1, 0], [0, 0]])
         corner_bin_ij = corner_ij[:, np.newaxis, :] + offsets[np.newaxis, :, :]
+        assert corner_bin_ij.shape == (n_corners, 4, 2)
         corner_bin_idx = get_bin_index(corner_bin_ij, bin_def)
-        print("corner bin idx")
-        print(corner_bin_idx.shape)
-        print(corner_bin_idx)
+        assert corner_bin_idx.shape == (n_corners, 4)
 
-        print("dequantize")
-        corner_xyz = dequantize(corner_ij, bin_def)
-        print(corner_xyz)
+        # Find bins with corners that lie between the rays.
+        corner_distances_left = signed_distance_point_to_line(corner_xy, viewer_xy, viewer_ray_left)
+        corner_distances_right = signed_distance_point_to_line(corner_xy, viewer_xy, viewer_ray_right)
+        mask = np.logical_and(corner_distances_left > 0.0, corner_distances_right < 0.0)
+        assert mask.shape == (n_corners,)
+        visible_bins = jnp.unique(corner_bin_idx[mask])
+        n_visible_bins = visible_bins.shape[0]
+        bin_mask = np.zeros(spatial_sort.n_total_bins, dtype=bool)
+        bin_mask[visible_bins] = True
 
-        print("corner_distances args")
-        print(corner_xyz.shape)
-        print(viewer_xy.shape)
-        print(viewer_dir.shape)
-        corner_distances = distance_point_to_line(corner_xyz, viewer_xy, viewer_dir)
-        print("corner_distances")
-        print(corner_distances.shape)
-        print(corner_distances)
-        print("")
+        # Find the points in the visible bins.
+        # Generate the list of indices i such that visible_bins[spatial_sort.bins[i]] is True.
+        tmp = np.asarray(bin_mask[spatial_sort.bins])
+        assert tmp.shape == (n_ground_points,)
+        visible_point_idx = tmp.nonzero()[0]
+        n_visible_points = visible_point_idx.shape[0]
+        print("{n_visible_points} visible points")
 
-        mask = corner_distances < 0.5 * jnp.max(bin_def.bin_size)
-        print("mask count", jnp.sum(mask))
+        # Subset points
+        ground_points = ground_points[visible_point_idx]
 
         self.canvas = WgpuCanvas(size=(1200, 800))
         self.renderer = gfx.renderers.WgpuRenderer(self.canvas)
@@ -150,6 +163,15 @@ class PointCloudVis:
 
 
 def main():
+    # bins = np.array([0, 0, 1, 1, 1, 3, 4, 4])
+    # mask = np.array([True, False, True, True, False])
+
+    # # Generate the list of indices i such that mask[bins[i]] is True
+    # tmp = np.asarray(mask[bins])
+    # print(tmp)
+    # indices = tmp.nonzero()
+    # print(indices)
+
     print("Loading points...")
     tree_points=np.load(npz_small_dir / "tree_points.npz")["points"]
     ground_points = np.load(npz_small_dir / "ground_points.npz")["points"]

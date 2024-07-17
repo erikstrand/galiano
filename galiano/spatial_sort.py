@@ -9,7 +9,7 @@ from quantization import BinDef, get_bin_index, quantize
 class SpatialSortData(NamedTuple):
     n_points: jnp.ndarray  # () int
     positions: jnp.ndarray  # (max_points, n_dims) float
-    bins: jnp.ndarray  # (max_points, n_dims) int
+    bins: jnp.ndarray  # (max_points,) int
     bin_counts: jnp.ndarray  # (n_total_bins,) int
     bin_starts: jnp.ndarray  # (n_total_bins,) int
     bin_contents: jnp.ndarray  # (max_points,) int
