@@ -53,6 +53,11 @@ def signed_distance_point_to_line(point, line_point, line_direction):
 
 class PointCloudVis:
     def __init__(self, ground_points, tree_points):
+        canvas_size=(1200, 800)
+        aspect_ratio = canvas_size[1] / canvas_size[0]
+        near = 0.001
+        far = 10.0
+
         n_ground_points = ground_points.shape[0]
         print("Building spatial sort for ground points...")
         bin_def, spatial_sort = build_spatial_sort(ground_points[:, :2])
@@ -68,17 +73,35 @@ class PointCloudVis:
         index, distance = find_nearest_neighbor(spatial_sort, bin_def, viewer_xy)
         viewer_xyz = ground_points[index] + np.array([0.0, 0.0, 0.005])
 
-        # Define the viewer orientation. X is left, Y is up, Z is backward. Here the first index
-        # identifies the vector of the frame, and the second is the coordinate value in world space.
+        # Define the viewer orientation. X is left, Y is up, Z is forward. Note that it is a left
+        # handed system. Here the first index identifies the vector of the frame, and the second is
+        # the coordinate value in world space.
         viewer_frame = jnp.array([
             [0.0, -1.0, 0.0],
             [0.0, 0.0, 1.0],
-            [-1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
         ])
         viewer_fov_x = 60.0 * (jnp.pi / 180.0)
+        viewer_fov_y = viewer_fov_x * aspect_ratio
+        fov_bound_x = jnp.tan(0.5 * viewer_fov_x)
+        fov_bound_y = jnp.tan(0.5 * viewer_fov_y)
 
         # Convert points to camera space.
         ground_points_camera = jnp.einsum("ij,kj->ki", viewer_frame, ground_points - viewer_xyz)
+
+        # Convert points to projective space.
+        zs = ground_points_camera[:, 2][:, None]
+        ground_points_proj = jnp.concatenate([ground_points_camera[:, :2] / zs, zs], axis=1)
+
+        # Clip.
+        mask = jnp.logical_and(
+            ground_points_proj[:, 0] >= -fov_bound_x,
+            ground_points_proj[:, 0] <= fov_bound_x,
+        )
+        mask = jnp.logical_and(mask, ground_points_proj[:, 1] >= -fov_bound_y)
+        mask = jnp.logical_and(mask, ground_points_proj[:, 1] <= fov_bound_y)
+        mask = jnp.logical_and(mask, ground_points_proj[:, 2] >= near)
+        mask = jnp.logical_and(mask, ground_points_proj[:, 2] <= far)
 
         self.canvas = WgpuCanvas(size=(1200, 800))
         self.renderer = gfx.renderers.WgpuRenderer(self.canvas)
@@ -96,9 +119,9 @@ class PointCloudVis:
         self.ambient_light = gfx.AmbientLight()
         self.scene.add(self.ambient_light)
 
-        ground_points_camera = np.asarray(ground_points_camera)
-        self.add_points(ground_points_camera, (0.0, 0.0, 1.0))
-        # self.add_points(tree_points, (0.0, 1.0, 0.0))
+        ground_points = ground_points[mask]
+        self.add_points(ground_points, (0.0, 0.0, 1.0))
+        self.add_points(tree_points, (0.0, 1.0, 0.0))
 
         # self.grid = gfx.Grid(
         #     None,
@@ -121,7 +144,7 @@ class PointCloudVis:
         material = gfx.PointsMaterial(color=color, size=1.0)
         points = gfx.Points(geometry, material)
         self.scene.add(points)
-        self.camera.show_object(points, up=(0, 1, 0))
+        self.camera.show_object(points, up=(0, 0, 1))
 
     def animate(self):
         self.renderer.render(self.scene, self.camera)
