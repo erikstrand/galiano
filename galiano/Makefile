@@ -20,7 +20,7 @@ all: $(NPZ_FILES_XYZ) $(NPZ_FILES_CLASS)
 
 # Rule to convert .laz to .npz for XYZ
 $(NPZ_DIR)/%_xyz.npz: $(LAZ_DIR)/%.laz
-	python $(SCRIPT) --input $< --output $@
+	python $(XYZ_SCRIPT) --input $< --output $@
 
 # Rule to convert .laz to .npz for classification
 $(NPZ_DIR)/%_class.npz: $(LAZ_DIR)/%.laz
