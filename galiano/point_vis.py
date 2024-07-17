@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 
 from lat_lon import lat_lon_alt_to_cartesian
-from quantization import make_bin_def
+from quantization import make_bin_def, get_bin_index, dequantize
 from spatial_sort import make_spatial_sort, insert_points_dense, find_nearest_neighbor
 
 
@@ -25,22 +25,80 @@ def build_spatial_sort(points, dx=0.01):
     return bin_def, spatial_sort
 
 
+def distance_point_to_line(point, line_point, line_direction):
+    """
+    Computes the distance between a line and a point in 2D.
+
+    Parameters:
+    - point: A numpy array representing the point (e.g., np.array([x, y])).
+    - line_point: A numpy array representing a point on the line (e.g., np.array([x, y])).
+    - line_direction: A numpy array representing the direction of the line (e.g., np.array([dx, dy])).
+
+    Returns:
+    - The distance between the point and the line.
+    """
+    # Normalize the line direction
+    line_direction = line_direction / jnp.linalg.norm(line_direction)
+
+    # Compute the vector from the line point to the point
+    point_vector = point - line_point
+
+    # Compute the projection of the point_vector onto the line_direction
+    projection_length = jnp.einsum("...i,i->...", point_vector, line_direction)
+    projection_vector = projection_length[..., None] * line_direction
+
+    # Compute the perpendicular vector
+    perpendicular_vector = point_vector - projection_vector
+
+    # Compute the distance as the norm of the perpendicular vector
+    distance = jnp.linalg.norm(perpendicular_vector, axis=-1)
+
+    return distance
+
+
 class PointCloudVis:
     def __init__(self, ground_points, tree_points):
         print("Building spatial sort...")
         bin_def, spatial_sort = build_spatial_sort(ground_points[:, :2])
+        print(f"n bins: {bin_def.n_bins}")
         print(f"bin size: {bin_def.bin_size}")
+        print(f"max bin occupancy: {jnp.max(spatial_sort.bin_counts)}")
         print("")
 
-        index, distance = find_nearest_neighbor(spatial_sort, bin_def, jnp.array([0.0, 0.0]))
-        print(f"nearest index: {index}")
-        print(f"distance: {distance}")
-        pos = ground_points[index]
-        print(f"nearest pos: {1000 * pos}")
-
         viewer_xy = jnp.array([-0.54, -0.21])
+        viewer_dir = jnp.array([1.0, 0.0])
         index, distance = find_nearest_neighbor(spatial_sort, bin_def, viewer_xy)
         viewer_xyz = ground_points[index] + np.array([0.0, 0.0, 0.005])
+
+        print("grid")
+        ranges = [np.arange(1, n) for n in bin_def.n_bins]
+        mesh = np.meshgrid(*ranges, indexing='ij')
+        corner_ij = jnp.array(np.stack(mesh, axis=-1).reshape(-1, bin_def.n_bins.size))
+        print(corner_ij.shape)
+
+        offsets = np.array([[-1, -1], [0, -1], [-1, 0], [0, 0]])
+        corner_bin_ij = corner_ij[:, np.newaxis, :] + offsets[np.newaxis, :, :]
+        corner_bin_idx = get_bin_index(corner_bin_ij, bin_def)
+        print("corner bin idx")
+        print(corner_bin_idx.shape)
+        print(corner_bin_idx)
+
+        print("dequantize")
+        corner_xyz = dequantize(corner_ij, bin_def)
+        print(corner_xyz)
+
+        print("corner_distances args")
+        print(corner_xyz.shape)
+        print(viewer_xy.shape)
+        print(viewer_dir.shape)
+        corner_distances = distance_point_to_line(corner_xyz, viewer_xy, viewer_dir)
+        print("corner_distances")
+        print(corner_distances.shape)
+        print(corner_distances)
+        print("")
+
+        mask = corner_distances < 0.5 * jnp.max(bin_def.bin_size)
+        print("mask count", jnp.sum(mask))
 
         self.canvas = WgpuCanvas(size=(1200, 800))
         self.renderer = gfx.renderers.WgpuRenderer(self.canvas)

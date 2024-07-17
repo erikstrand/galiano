@@ -1,4 +1,5 @@
 from typing import NamedTuple
+import jax
 import jax.numpy as jnp
 
 
@@ -111,3 +112,19 @@ def quantize(x: jnp.ndarray, bin_def: BinDef) -> jnp.ndarray:
     # Convert to an integer and clip.
     bin_idx = bin_idx.astype(bin_def.n_bins.dtype)
     return jnp.clip(bin_idx, a_min=0, a_max=bin_def.n_bins - 1)
+
+
+def dequantize(bin_coords: jnp.ndarray, bin_def: BinDef) -> jnp.ndarray:
+    """
+    Dequantizes a bin index into a floating point value.
+
+    If you give an integral value for bin_coords, you'll get the lower left corner. You can add a
+    fractional offset to get e.g. the center of the bin.
+    """
+
+    assert (
+        len(bin_coords.shape) == 0
+        or (len(bin_coords.shape) == 1 and bin_def.dim == 1)
+        or bin_coords.shape[-1] == bin_def.n_bins.shape[0]
+    )
+    return bin_def.bounds[0] + bin_coords * bin_def.bin_size
