@@ -68,57 +68,24 @@ class PointCloudVis:
         index, distance = find_nearest_neighbor(spatial_sort, bin_def, viewer_xy)
         viewer_xyz = ground_points[index] + np.array([0.0, 0.0, 0.005])
 
-        # Define the viewer field of view.
-        viewer_dir = jnp.array([1.0, 0.0])
-        viewer_fov = 50.0 * (jnp.pi / 180.0)
-        viewer_ray_left = jnp.array([jnp.cos(viewer_fov / 2), jnp.sin(viewer_fov / 2)])
-        viewer_ray_right = jnp.array([jnp.cos(-viewer_fov / 2), jnp.sin(-viewer_fov / 2)])
+        # Define the viewer orientation. X is left, Y is up, Z is backward. Here the first index
+        # identifies the vector of the frame, and the second is the coordinate value in world space.
+        viewer_frame = jnp.array([
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [-1.0, 0.0, 0.0],
+        ])
+        viewer_fov_x = 60.0 * (jnp.pi / 180.0)
 
-        # Compute the integer indices and XY coordinates of the corners of all bins.
-        # (Ok, almost all corners. We exclude corners on the boundary.)
-        ranges = [np.arange(1, n) for n in bin_def.n_bins]
-        mesh = np.meshgrid(*ranges, indexing='ij')
-        corner_ij = jnp.array(np.stack(mesh, axis=-1).reshape(-1, bin_def.n_bins.size))
-        corner_xy = dequantize(corner_ij, bin_def)
-        n_corners = corner_ij.shape[0]
-        assert corner_ij.shape == (n_corners, 2)
-        assert corner_xy.shape == (n_corners, 2)
-
-        # Compute the bin coords of the bins that are adjacent to each corner.
-        # (This is why we excluded boundary corners. They would have less than four neighbors.)
-        offsets = np.array([[-1, -1], [0, -1], [-1, 0], [0, 0]])
-        corner_bin_ij = corner_ij[:, np.newaxis, :] + offsets[np.newaxis, :, :]
-        assert corner_bin_ij.shape == (n_corners, 4, 2)
-        corner_bin_idx = get_bin_index(corner_bin_ij, bin_def)
-        assert corner_bin_idx.shape == (n_corners, 4)
-
-        # Find bins with corners that lie between the rays.
-        corner_distances_left = signed_distance_point_to_line(corner_xy, viewer_xy, viewer_ray_left)
-        corner_distances_right = signed_distance_point_to_line(corner_xy, viewer_xy, viewer_ray_right)
-        mask = np.logical_and(corner_distances_left > 0.0, corner_distances_right < 0.0)
-        assert mask.shape == (n_corners,)
-        visible_bins = jnp.unique(corner_bin_idx[mask])
-        n_visible_bins = visible_bins.shape[0]
-        bin_mask = np.zeros(spatial_sort.n_total_bins, dtype=bool)
-        bin_mask[visible_bins] = True
-
-        # Find the points in the visible bins.
-        # Generate the list of indices i such that visible_bins[spatial_sort.bins[i]] is True.
-        tmp = np.asarray(bin_mask[spatial_sort.bins])
-        assert tmp.shape == (n_ground_points,)
-        visible_point_idx = tmp.nonzero()[0]
-        n_visible_points = visible_point_idx.shape[0]
-        print("{n_visible_points} visible points")
-
-        # Subset points
-        ground_points = ground_points[visible_point_idx]
+        # Convert points to camera space.
+        ground_points_camera = jnp.einsum("ij,kj->ki", viewer_frame, ground_points - viewer_xyz)
 
         self.canvas = WgpuCanvas(size=(1200, 800))
         self.renderer = gfx.renderers.WgpuRenderer(self.canvas)
         self.scene = gfx.Scene()
 
         self.axes = gfx.AxesHelper(size=0.1, thickness=2)
-        self.axes.world.position = viewer_xyz
+        # self.axes.world.position = viewer_xyz
         self.scene.add(self.axes)
 
         self.camera = gfx.PerspectiveCamera(fov=60, aspect=1, depth_range=(0.1, 1000.0))
@@ -129,30 +96,32 @@ class PointCloudVis:
         self.ambient_light = gfx.AmbientLight()
         self.scene.add(self.ambient_light)
 
-        self.add_points(ground_points, (0.0, 0.0, 1.0))
-        self.add_points(tree_points, (0.0, 1.0, 0.0))
+        ground_points_camera = np.asarray(ground_points_camera)
+        self.add_points(ground_points_camera, (0.0, 0.0, 1.0))
+        # self.add_points(tree_points, (0.0, 1.0, 0.0))
 
-        self.grid = gfx.Grid(
-            None,
-            gfx.GridMaterial(
-                major_step=0.1,
-                thickness_space="world",
-                major_thickness=0.002,
-                infinite=True,
-            ),
-            orientation="xy",
-        )
-        self.scene.add(self.grid)
+        # self.grid = gfx.Grid(
+        #     None,
+        #     gfx.GridMaterial(
+        #         major_step=0.1,
+        #         thickness_space="world",
+        #         major_thickness=0.002,
+        #         infinite=True,
+        #     ),
+        #     orientation="xy",
+        # )
+        # self.scene.add(self.grid)
 
 
     def add_points(self, points, color):
+        points = points.astype(np.float32)
         n_points = points.shape[0]
         assert points.shape == (n_points, 3)
         geometry = gfx.Geometry(positions=points)
         material = gfx.PointsMaterial(color=color, size=1.0)
         points = gfx.Points(geometry, material)
         self.scene.add(points)
-        self.camera.show_object(points, up=(0, 0, 1))
+        self.camera.show_object(points, up=(0, 1, 0))
 
     def animate(self):
         self.renderer.render(self.scene, self.camera)
