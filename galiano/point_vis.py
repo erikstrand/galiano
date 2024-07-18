@@ -1,4 +1,5 @@
 from pathlib import Path
+from functools import partial
 from wgpu.gui.auto import WgpuCanvas, run
 import numpy as np
 import pygfx as gfx
@@ -52,18 +53,14 @@ def signed_distance_point_to_line(point, line_point, line_direction):
     return signed_distance
 
 
+@partial(jax.jit, static_argnums=(0,))
 def splat_tile(
     tile_size: tuple[int, int],  # static (16, 16)
     tile_bounds: jax.Array,  # [[x_min, y_min], [x_max, y_max]] in the projection plane
     means: jax.Array,  # shape (max_splats, 2), in projected space
     variances: jax.Array,  # shape (max_splats,), in projected space
 ):
-    print(f"tile bounds {tile_bounds}")
-    print(means.shape)
-    print(variances.shape)
-
     n_splats = means.shape[0]
-    print(f"{n_splats} splats")
     assert means.shape == (n_splats, 2)
     assert variances.shape == (n_splats,)
     assert tile_bounds.shape == (2, 2)
@@ -87,12 +84,11 @@ def splat_tile(
 
     base_color = jnp.array([0.5, 0.2, 0.1, 1.0])
 
-    # Work through the splats from front to back.
-    for i in range(n_splats):
-        mean = means[i]
-        variance = variances[i]
-        print(f"mean: {mean}")
-        print(f"variance: {variance}")
+    def body(state):
+        idx, rgba_buffer = state
+
+        mean = means[idx]
+        variance = variances[idx]
 
         # Compute the distance from the mean to each pixel.
         distance = jnp.linalg.norm(pixel_xy - mean, axis=-1)
@@ -108,17 +104,26 @@ def splat_tile(
         color = base_color * alpha[:, :, None]
         assert color.shape == tile_size + (4,)
 
-        # Update the buffers. We use the formula R = S + D * (1 - S_A), where R is RGBA for the
+        # Update the buffer. We use the formula R = S + D * (1 - S_A), where R is RGBA for the
         # result, S is RGBA for the source (top layer), and D is RGBA for the destination (bottom
         # layer). S_A refers to the alpha channel of the source. This formula assumes that the RGB
         # components have been multiplied by the alpha channel.
         s_alpha = rgba_buffer[..., 3, None]
         rgba_buffer = rgba_buffer + color * (1.0 - s_alpha)
 
-        # Exit if all pixels have converged.
-        if jnp.all(rgba_buffer[..., 3] > 0.999):
-            print("break")
-            break
+        return (idx + 1, rgba_buffer)
+
+    def cond(state):
+        # Continue as long as there are more splats to process and some pixel isn't opaque.
+        idx, rgba_buffer = state
+        return jnp.logical_and(
+            idx < n_splats,
+            jnp.any(rgba_buffer[..., 3] < 0.999),
+        )
+
+    # Work through the splats from front to back.
+    state = (jnp.array(0, dtype=jnp.int32), rgba_buffer)
+    n_processed_splats, rgba_buffer = jax.lax.while_loop(cond, body, state)
 
     # TODO Do I divide by alpha?
     return rgba_buffer
