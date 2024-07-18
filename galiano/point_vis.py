@@ -55,7 +55,7 @@ def signed_distance_point_to_line(point, line_point, line_direction):
 
 @partial(jax.jit, static_argnums=(0,))
 def splat_tile(
-    tile_size: tuple[int, int],  # static (16, 16)
+    tile_size: tuple[int, int], # 16 x 16 in Kerbl et. al "3D Gaussian Splatting..." (2023)
     tile_bounds: jax.Array,  # [[x_min, y_min], [x_max, y_max]] in the projection plane
     means: jax.Array,  # shape (max_splats, 2), in projected space
     variances: jax.Array,  # shape (max_splats,), in projected space
@@ -130,6 +130,8 @@ def splat_tile(
 
 
 def render_splats(
+    tile_size: tuple[int, int],
+    n_tiles: tuple[int, int],
     points,
     viewer_xyz,
     viewer_frame,
@@ -139,49 +141,72 @@ def render_splats(
     far,
     splat_radius,
 ):
-    # Convert points to camera space.
-    points = jnp.einsum("ij,kj->ki", viewer_frame, points - viewer_xyz)
-
-    # Convert points to projective space.
-    zs = points[:, 2][:, None]
-    points_proj = jnp.concatenate([points[:, :2] / zs, zs], axis=1)
-
-    # Clip. Note: Splats with centers outside the frustrum can still affect it. I need to account
-    # for this.
+    # Compute tile bounds (in the image plane i.e. z = 1).
     fov_bound_x = jnp.tan(0.5 * viewer_fov_x)
     fov_bound_y = jnp.tan(0.5 * viewer_fov_y)
-    mask = jnp.logical_and(
-        points_proj[:, 0] >= -fov_bound_x,
-        points_proj[:, 0] <= fov_bound_x,
-    )
-    mask = jnp.logical_and(mask, points_proj[:, 1] >= -fov_bound_y)
-    mask = jnp.logical_and(mask, points_proj[:, 1] <= fov_bound_y)
-    mask = jnp.logical_and(mask, points_proj[:, 2] >= near)
-    mask = jnp.logical_and(mask, points_proj[:, 2] <= far)
-    points_proj = points_proj[mask]
-    print(f"n points in frustrum: {points_proj.shape[0]}")
-
-    # Sort.
-    order = jnp.argsort(points_proj[:, 2])
-    points_proj = points_proj[order]
-
-    # Compute screen space splat size. For now I'm assuming the splats are still circular after
-    # projection to the screen, which is approximately true if they are all aligned with the view
-    # direction. Later I should model the screen space splats as ellipses.
-    screen_splat_radii = splat_radius / points_proj[:, 2]
-
-    tile_size = (32, 32)
     tile_view_bounds = jnp.array(
         [
             [-fov_bound_x, -fov_bound_y],
             [fov_bound_x, fov_bound_y],
         ]
     )
+    tile_plane_x = jnp.linspace(tile_view_bounds[0, 0], tile_view_bounds[1, 0], n_tiles[0] + 1)
+    tile_plane_y = jnp.linspace(tile_view_bounds[0, 1], tile_view_bounds[1, 1], n_tiles[1] + 1)
+
+    # Convert points to camera space.
+    points = jnp.einsum("ij,kj->ki", viewer_frame, points - viewer_xyz)
+
+    # Clip based on near and far planes.
+    print(f"Starting with {points.shape[0]} points")
+    print("Clipping points based on near and far planes...")
+    mask = jnp.logical_and(points[:, 2] >= near, points[:, 2] <= far)
+    # points = points[mask]
+    # print(f"{points.shape[0]} points remaining")
+
+    # Clip based on field of view.
+    # We interpret splat radius as the standard deviation of a 2D Gaussian.
+    print("Clipping points based on field of view...")
+    two_sigma = 2 * splat_radius
+    inverse_zs = 1.0 / points[:, 2, None]
+    assert inverse_zs.shape == (points.shape[0], 1)
+    print("a")
+    mask = jnp.logical_and(mask, (points[:, 0] + two_sigma) * inverse_zs >= -fov_bound_x)
+    print("a")
+    mask = jnp.logical_and(mask, (points[:, 0] - two_sigma) * inverse_zs <= fov_bound_x)
+    print("a")
+    mask = jnp.logical_and(mask, (points[:, 1] + two_sigma) * inverse_zs >= -fov_bound_y)
+    print("a")
+    mask = jnp.logical_and(mask, (points[:, 1] - two_sigma) * inverse_zs <= fov_bound_y)
+    print("a")
+    points = points[mask]
+    print(f"{points.shape[0]} points remaining")
+
+    # Project the remaining points to the image plane.
+    zs = points[:, 2, None]
+    points_proj = jnp.concatenate([points[:, :2] / zs, zs], axis=1)
+
+    # Compute splat size in the image plane. For now I'm assuming the splats are still circular
+    # after projection to the screen, which is approximately true if they are all aligned with the
+    # view direction. Later I should model the screen space splats as ellipses.
+    screen_splat_radii = splat_radius / points_proj[:, 2]
+
+    # Globally sort splats by z.
+    order = jnp.argsort(points_proj[:, 2])
+    points_proj = points_proj[order]
+
+    # Assign splats to tiles.
+    # Ideally I'd spawn a thread per splat, and add its index to the arrays for relevant tiles.
+    # But this isn't doable in JAX. For now I'll make a giant boolean array and cumsum it to get
+    # id slots. But this will use a lot of memory so I might have to do it in chunks.
+    # ...
 
     # n_subset = 16
     # means = points_proj[:n_subset, :2]
     # variances = screen_splat_radii[:n_subset]**2
 
+    # Per-tile sort would be here... Probably not necessary as long as my splats are all aligned.
+
+    # Render each tile. Vmap or loop?
     means = points_proj[:, :2]
     variances = screen_splat_radii**2
     image_rgba = splat_tile(tile_size, tile_view_bounds, means, variances)
@@ -296,7 +321,11 @@ def main():
     near = 0.001
     far = 10.0
     splat_size = 0.001
+    tile_size = (32, 32)
+    n_tiles = (2, 2)
     mask, image = render_splats(
+        tile_size,
+        n_tiles,
         ground_points,
         viewer_xyz,
         viewer_frame,
