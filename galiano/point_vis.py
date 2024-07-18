@@ -156,34 +156,24 @@ def render_splats(
     # Convert points to camera space.
     points = jnp.einsum("ij,kj->ki", viewer_frame, points - viewer_xyz)
 
-    # Clip based on near and far planes.
-    print(f"Starting with {points.shape[0]} points")
-    print("Clipping points based on near and far planes...")
-    mask = jnp.logical_and(points[:, 2] >= near, points[:, 2] <= far)
-    # points = points[mask]
-    # print(f"{points.shape[0]} points remaining")
-
-    # Clip based on field of view.
-    # We interpret splat radius as the standard deviation of a 2D Gaussian.
-    print("Clipping points based on field of view...")
-    two_sigma = 2 * splat_radius
-    inverse_zs = 1.0 / points[:, 2, None]
-    assert inverse_zs.shape == (points.shape[0], 1)
-    print("a")
-    mask = jnp.logical_and(mask, (points[:, 0] + two_sigma) * inverse_zs >= -fov_bound_x)
-    print("a")
-    mask = jnp.logical_and(mask, (points[:, 0] - two_sigma) * inverse_zs <= fov_bound_x)
-    print("a")
-    mask = jnp.logical_and(mask, (points[:, 1] + two_sigma) * inverse_zs >= -fov_bound_y)
-    print("a")
-    mask = jnp.logical_and(mask, (points[:, 1] - two_sigma) * inverse_zs <= fov_bound_y)
-    print("a")
-    points = points[mask]
-    print(f"{points.shape[0]} points remaining")
-
-    # Project the remaining points to the image plane.
-    zs = points[:, 2, None]
+    # Project points to the image plane.
+    zs = points[:, 2][:, None]
     points_proj = jnp.concatenate([points[:, :2] / zs, zs], axis=1)
+
+    # Clip. Note: Splats with centers outside the frustrum can still affect it. I need to account
+    # for this.
+    fov_bound_x = jnp.tan(0.5 * viewer_fov_x)
+    fov_bound_y = jnp.tan(0.5 * viewer_fov_y)
+    mask = jnp.logical_and(
+        points_proj[:, 0] >= -fov_bound_x,
+        points_proj[:, 0] <= fov_bound_x,
+    )
+    mask = jnp.logical_and(mask, points_proj[:, 1] >= -fov_bound_y)
+    mask = jnp.logical_and(mask, points_proj[:, 1] <= fov_bound_y)
+    mask = jnp.logical_and(mask, points_proj[:, 2] >= near)
+    mask = jnp.logical_and(mask, points_proj[:, 2] <= far)
+    points_proj = points_proj[mask]
+    print(f"n points in frustrum: {points_proj.shape[0]}")
 
     # Compute splat size in the image plane. For now I'm assuming the splats are still circular
     # after projection to the screen, which is approximately true if they are all aligned with the
