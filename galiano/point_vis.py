@@ -182,13 +182,14 @@ pair_splats_and_tiles = jax.jit(
 def splat_tile(
     # 16 x 16 in Kerbl et. al "3D Gaussian Splatting..." (2023)
     tile_size: tuple[int, int],
-    tile_bounds,  # [[x_min, y_min], [x_max, y_max]] in the projection plane
-    points,  # shape (max_splats, 2), in world space
-    viewer_xyz,
-    viewer_frame,
-    splat_radius,  # scalar
-    n_splats,  # scalar
-    splat_ids,
+    tile_bounds: jax.Array,  # [[x_min, y_min], [x_max, y_max]] in the projection plane
+    points: jax.Array,  # shape (max_splats, 2), in world space
+    colors: jax.Array,  # shape (max_splats, 4), RGBA
+    viewer_xyz: jax.Array,
+    viewer_frame: jax.Array,
+    splat_radius: float,  # scalar
+    n_splats: int,  # scalar
+    splat_ids: jax.Array,
 ):
     assert tile_bounds.shape == (2, 2)
 
@@ -224,7 +225,9 @@ def splat_tile(
     means = splat_xyz_proj[sort_order, :2]
     variances = splat_radii_proj[sort_order] ** 2
 
-    base_color = jnp.array([0.5, 0.2, 0.1, 1.0])
+    # Load colors
+    splat_colors = colors[splat_ids]
+    splat_colors = splat_colors[sort_order]
 
     # Initialize the tile.
     rgba_buffer = jnp.zeros(tile_size + (4,), dtype=jnp.float32)
@@ -234,6 +237,7 @@ def splat_tile(
 
         mean = means[idx]
         variance = variances[idx]
+        color = splat_colors[idx]
 
         # Compute the distance from the mean to each pixel.
         distance = jnp.linalg.norm(pixel_xy - mean, axis=-1)
@@ -241,12 +245,12 @@ def splat_tile(
 
         # Compute the alpha for each pixel.
         # Clip to zero after 2 standard deviations.
-        alpha = jnp.exp(-0.5 * distance**2 / variance)
+        alpha = color[3] * jnp.exp(-0.5 * distance**2 / variance)
         alpha = jnp.where(distance < 2.0 * jnp.sqrt(variance), alpha, 0.0)
         assert alpha.shape == tile_size
 
         # Premultiply the color by the alpha.
-        color = base_color * alpha[:, :, None]
+        color = color * alpha[:, :, None]
         assert color.shape == tile_size + (4,)
 
         # Update the buffer. We use the formula R = S + D * (1 - S_A), where R is RGBA for the
@@ -276,7 +280,9 @@ def splat_tile(
 
 splat_tiles = jax.jit(
     jax.vmap(
-        splat_tile, in_axes=(None, 0, None, None, None, None, 0, 0), out_axes=(0, 0)
+        splat_tile,
+        in_axes=(None, 0, None, None, None, None, None, 0, 0),
+        out_axes=(0, 0),
     ),
     static_argnums=(0,),
 )
@@ -308,6 +314,7 @@ def render_splats(
     tile_size: tuple[int, int],
     n_tiles: tuple[int, int],
     points,
+    colors,
     viewer_xyz,
     viewer_frame,
     viewer_fov_x,
@@ -336,20 +343,26 @@ def render_splats(
 
     print("Collecting visible splats...")
     visible_splat_capacity = 500_000
-    n_visible_splats, splat_ids = collect_visible_splats(
-        visible_splat_capacity,
-        points,
-        viewer_xyz,
-        viewer_frame,
-        viewer_fov_x,
-        viewer_fov_y,
-        near,
-        far,
-        splat_radius,
-    )
-    print(f"{n_visible_splats} visible splats: {splat_ids[:n_visible_splats]}")
-    if n_visible_splats >= visible_splat_capacity:
-        raise ValueError("Too many visible splats")
+    while True:
+        n_visible_splats, splat_ids = collect_visible_splats(
+            visible_splat_capacity,
+            points,
+            viewer_xyz,
+            viewer_frame,
+            viewer_fov_x,
+            viewer_fov_y,
+            near,
+            far,
+            splat_radius,
+        )
+        n_visible_splats = int(n_visible_splats)
+        print(f"{n_visible_splats} visible splats: {splat_ids[:n_visible_splats]}")
+        if n_visible_splats <= visible_splat_capacity:
+            break
+        else:
+            print("Too many visible splats; allocating a bigger buffer.")
+            visible_splat_capacity = n_visible_splats
+            continue
     print("")
 
     # Compute tile bounds (in the image plane i.e. z = 1).
@@ -392,7 +405,7 @@ def render_splats(
         n_tile_splats,
         tile_splats,
     )
-    print(f"n intersecting splats: {n_tile_splats}")
+    # print(f"n intersecting splats: {n_tile_splats}")
     print("")
 
     # Render each tile.
@@ -401,13 +414,14 @@ def render_splats(
         tile_size,
         tile_bounds,  # [[x_min, y_min], [x_max, y_max]] in the projection plane
         points,  # shape (max_splats, 2), in world space
+        colors,
         viewer_xyz,
         viewer_frame,
         splat_radius,  # scalar
         n_tile_splats,  # scalar
         tile_splats,
     )
-    print(f"n processed splats: {n_processed_splats}")
+    # print(f"n processed splats: {n_processed_splats}")
     print("")
 
     print("Merging tiles...")
@@ -519,6 +533,22 @@ def main():
     viewer_fov_x = 60.0 * (jnp.pi / 180.0)
     viewer_fov_y = viewer_fov_x * aspect_ratio
 
+    print("Building splats...")
+    all_points = np.concatenate([ground_points, tree_points], axis=0)
+    ground_color = np.array([0.5, 0.2, 0.1, 1.0])
+    tree_color = np.array([0.1, 0.6, 0.2, 1.0])
+    colors = np.concatenate(
+        [
+            np.tile(ground_color[None, :], (ground_points.shape[0], 1)),
+            np.tile(tree_color[None, :], (tree_points.shape[0], 1)),
+        ],
+        axis=0,
+    )
+    # hack
+    # all_points = tree_points
+    # colors = np.tile(tree_color[None, :], (tree_points.shape[0], 1))
+    print("")
+
     print("Rendering image...")
     near = 0.001
     far = 10.0
@@ -528,7 +558,8 @@ def main():
     image, n_visible_splats, splat_ids = render_splats(
         tile_size,
         n_tiles,
-        ground_points,
+        all_points,
+        colors,
         viewer_xyz,
         viewer_frame,
         viewer_fov_x,
@@ -544,9 +575,9 @@ def main():
     print(f"Saving to {image_path}")
     write_array_as_image(image, image_path)
 
-    ground_points = ground_points[splat_ids]
-    vis = PointCloudVis(ground_points, tree_points)
-    vis.run()
+    # ground_points = ground_points[splat_ids]
+    # vis = PointCloudVis(ground_points, tree_points)
+    # vis.run()
 
 
 if __name__ == "__main__":
