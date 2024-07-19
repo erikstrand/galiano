@@ -524,7 +524,7 @@ def main():
     far = 10.0
     splat_size = 0.001
     tile_size = (16, 16)
-    n_tiles = (4, 4)
+    n_tiles = (16, 16)
     image, n_visible_splats, splat_ids = render_splats(
         tile_size,
         n_tiles,
