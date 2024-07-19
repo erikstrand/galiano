@@ -1,10 +1,11 @@
-from pathlib import Path
 from functools import partial
+from pathlib import Path
 from wgpu.gui.auto import WgpuCanvas, run
-import numpy as np
-import pygfx as gfx
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pygfx as gfx
+import time
 
 from lat_lon import lat_lon_alt_to_cartesian
 from quantization import make_bin_def, get_bin_index, dequantize
@@ -323,6 +324,7 @@ def render_splats(
     Finally we render each tile. For each tile, this involves a lot of math for each splat in the
     tile's buffer.
     """
+    start_time = time.time()
     points = jnp.asarray(points)
 
     print("Collecting visible splats...")
@@ -384,10 +386,6 @@ def render_splats(
         tile_splats,
     )
     print(f"n intersecting splats: {n_tile_splats}")
-    print("intersecting splat ids", tile_splats)
-    print("tile bounds")
-    for tile_idx in range(4):
-        print(tile_bounds[tile_idx])
     print("")
 
     # Render each tile.
@@ -407,7 +405,11 @@ def render_splats(
 
     print("Merging tiles...")
     image = merge_tiles(n_tiles, image_rgb)
+    print("")
 
+    end_time = time.time()
+    elapsed = end_time - start_time
+    print(f"Elapsed time: {elapsed:.2f} seconds")
     return image, n_visible_splats, splat_ids
 
 
