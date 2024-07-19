@@ -126,16 +126,14 @@ def identify_splats_that_intersect_tile(
     visible_splat_ids,  # shape (max_visible_splats,), ids of visible splats
     tile_bounds,  # shape (2, 2): [[x_min, y_min], [x_max, y_max]]
     n_tile_splats,  # scalar, the number of splats already intersected with this tile
-    tile_splats,  # shape (capacity,), ids of splats in this tile
+    tile_splats,  # shape (capacity,), ids of splats in this tile (output, should be donated)
 ):
     n_points = points.shape[0]
     max_visible_splats = visible_splat_ids.shape[0]
     max_splats_per_tile = tile_splats.shape[0]
 
-    splat_mask = jnp.arange(n_points) < n_visible_splats
-    splat_xyz = points[visible_splat_ids]
-
     # Convert points to camera space.
+    splat_xyz = points[visible_splat_ids]
     splat_xyz = jnp.einsum("ij,kj->ki", viewer_frame, splat_xyz - viewer_xyz)
 
     # Project points to the image plane.
@@ -162,6 +160,9 @@ def identify_splats_that_intersect_tile(
     splat_slots = jnp.cumsum(mask)
     n_intersecting_splats = splat_slots[-1]
     splat_slots = jnp.where(mask, splat_slots + n_tile_splats - 1, max_splats_per_tile)
+    splat_slots = jnp.where(
+        jnp.arange(n_points) < n_visible_splats, splat_slots, max_splats_per_tile
+    )
     tile_splats = tile_splats.at[splat_slots].set(visible_splat_ids, mode="drop")
     return n_intersecting_splats, tile_splats
 
@@ -173,18 +174,17 @@ pair_splats_and_tiles = jax.vmap(
 )
 
 
-@partial(jax.jit, static_argnums=(0,))
 def splat_tile(
-    tile_size: tuple[
-        int, int
-    ],  # 16 x 16 in Kerbl et. al "3D Gaussian Splatting..." (2023)
-    tile_bounds: jax.Array,  # [[x_min, y_min], [x_max, y_max]] in the projection plane
-    means: jax.Array,  # shape (max_splats, 2), in projected space
-    variances: jax.Array,  # shape (max_splats,), in projected space
+    # 16 x 16 in Kerbl et. al "3D Gaussian Splatting..." (2023)
+    tile_size: tuple[int, int],
+    tile_bounds,  # [[x_min, y_min], [x_max, y_max]] in the projection plane
+    points,  # shape (max_splats, 2), in world space
+    viewer_xyz,
+    viewer_frame,
+    splat_radius,  # scalar
+    n_splats,  # scalar
+    splat_ids,
 ):
-    n_splats = means.shape[0]
-    assert means.shape == (n_splats, 2)
-    assert variances.shape == (n_splats,)
     assert tile_bounds.shape == (2, 2)
 
     # Construct pixel positions in the projection plane (z = 1).
@@ -195,16 +195,36 @@ def splat_tile(
     pixel_y = jnp.linspace(
         tile_bounds[0, 1], tile_bounds[1, 1], tile_size[1], endpoint=False
     )
+    print(pixel_x.shape, pixel_x)
+    print(pixel_y.shape, pixel_y)
     pixel_x = pixel_x + 0.5 * pixel_size[0]
     pixel_y = pixel_y + 0.5 * pixel_size[1]
     pixel_x, pixel_y = jnp.meshgrid(pixel_x, pixel_y, indexing="ij")
     pixel_xy = jnp.stack([pixel_x, pixel_y], axis=-1)
     assert pixel_xy.shape == (tile_size[0], tile_size[1], 2)
 
-    # Initialize buffers.
-    rgba_buffer = jnp.zeros(tile_size + (4,), dtype=jnp.float32)
+    # Convert points to camera space.
+    splat_xyz = points[splat_ids]
+    splat_xyz = jnp.einsum("ij,kj->ki", viewer_frame, splat_xyz - viewer_xyz)
+
+    # Project points to the image plane.
+    zs = splat_xyz[:, 2][:, None]
+    splat_xyz_proj = jnp.concatenate([splat_xyz[:, :2] / zs, zs], axis=1)
+
+    # Compute splat size in the image plane. For now I'm assuming the splats are still circular
+    # after projection to the screen, which is approximately true if they are all aligned with the
+    # view direction. Later I should model the screen space splats as ellipses.
+    splat_radii_proj = splat_radius / splat_xyz_proj[:, 2]
+
+    # Sort the splats by z.
+    sort_order = jnp.argsort(splat_xyz_proj[:, 2])
+    means = splat_xyz_proj[sort_order, :2]
+    variances = splat_radii_proj[sort_order] ** 2
 
     base_color = jnp.array([0.5, 0.2, 0.1, 1.0])
+
+    # Initialize the tile.
+    rgba_buffer = jnp.zeros(tile_size + (4,), dtype=jnp.float32)
 
     def body(state):
         idx, rgba_buffer = state
@@ -248,7 +268,12 @@ def splat_tile(
     n_processed_splats, rgba_buffer = jax.lax.while_loop(cond, body, state)
 
     # TODO Do I divide by alpha?
-    return rgba_buffer
+    return n_processed_splats, rgba_buffer
+
+
+splat_tiles = jax.vmap(
+    splat_tile, in_axes=(None, 0, None, None, None, None, 0, 0), out_axes=(0, 0)
+)
 
 
 def render_splats(
@@ -263,8 +288,23 @@ def render_splats(
     far,
     splat_radius,
 ):
+    """
+    Gaussian splat rendering.
+
+    We divide the image into 16x16 tiles.
+
+    We start with a very large array of splats. First we figure out which splats are potentially
+    visible. This involves some basic math on every splat, and produces a smaller array of splat
+    ids.
+
+    Next we figure out which tiles each splat intersects. This involves some additional math on all
+    the splats in the previous buffer. It produces a buffer of splat ids for each tile.
+
+    Finally we render each tile. For each tile, this involves a lot of math for each splat in the
+    tile's buffer.
+    """
     print("Collecting visible splats...")
-    visible_splat_capacity = 600_000
+    visible_splat_capacity = 500_000
     n_visible_splats, splat_ids = collect_visible_splats(
         visible_splat_capacity,
         points,
@@ -276,7 +316,10 @@ def render_splats(
         far,
         splat_radius,
     )
-    print(f"{n_visible_splats} visible splats")
+    print(f"{n_visible_splats} visible splats: {splat_ids[:n_visible_splats]}")
+    if n_visible_splats >= visible_splat_capacity:
+        raise ValueError("Too many visible splats")
+    print("")
 
     # Compute tile bounds (in the image plane i.e. z = 1).
     fov_bound_x = jnp.tan(0.5 * viewer_fov_x)
@@ -307,7 +350,7 @@ def render_splats(
     n_tile_splats = jnp.zeros((n_tiles_total,), dtype=jnp.uint32)
     max_splats_per_tile = 200_000
     tile_splats = jnp.zeros((n_tiles_total, max_splats_per_tile), dtype=jnp.uint32)
-    n_intersecting_splats, tile_splats = pair_splats_and_tiles(
+    n_tile_splats, tile_splats = pair_splats_and_tiles(
         points,
         viewer_xyz,
         viewer_frame,
@@ -318,64 +361,29 @@ def render_splats(
         n_tile_splats,
         tile_splats,
     )
-    print(f"n intersecting splats: {n_intersecting_splats}")
+    print(f"n intersecting splats: {n_tile_splats}")
     print("intersecting splat ids", tile_splats)
+    print("tile bounds")
     for tile_idx in range(4):
         print(tile_bounds[tile_idx])
     print("")
-    return
 
-    # Convert points to camera space.
-    points = jnp.einsum("ij,kj->ki", viewer_frame, points - viewer_xyz)
-
-    # Project points to the image plane.
-    zs = points[:, 2][:, None]
-    points_proj = jnp.concatenate([points[:, :2] / zs, zs], axis=1)
-
-    # Clip. Note: Splats with centers outside the frustrum can still affect it. I need to account
-    # for this.
-    fov_bound_x = jnp.tan(0.5 * viewer_fov_x)
-    fov_bound_y = jnp.tan(0.5 * viewer_fov_y)
-    mask = jnp.logical_and(
-        points_proj[:, 0] >= -fov_bound_x,
-        points_proj[:, 0] <= fov_bound_x,
+    # Render each tile.
+    print("Rendering tiles...")
+    n_processed_splats, image_rgb = splat_tile(
+        # 16 x 16 in Kerbl et. al "3D Gaussian Splatting..." (2023)
+        tile_size,
+        tile_bounds[2],  # [[x_min, y_min], [x_max, y_max]] in the projection plane
+        points,  # shape (max_splats, 2), in world space
+        viewer_xyz,
+        viewer_frame,
+        splat_radius,  # scalar
+        n_tile_splats[2],  # scalar
+        tile_splats[2],
     )
-    mask = jnp.logical_and(mask, points_proj[:, 1] >= -fov_bound_y)
-    mask = jnp.logical_and(mask, points_proj[:, 1] <= fov_bound_y)
-    mask = jnp.logical_and(mask, points_proj[:, 2] >= near)
-    mask = jnp.logical_and(mask, points_proj[:, 2] <= far)
-    points_proj = points_proj[mask]
-    print(f"n points in frustrum: {points_proj.shape[0]}")
+    print(f"n processed splats: {n_processed_splats}")
 
-    # Compute splat size in the image plane. For now I'm assuming the splats are still circular
-    # after projection to the screen, which is approximately true if they are all aligned with the
-    # view direction. Later I should model the screen space splats as ellipses.
-    screen_splat_radii = splat_radius / points_proj[:, 2]
-
-    # Globally sort splats by z.
-    order = jnp.argsort(points_proj[:, 2])
-    points_proj = points_proj[order]
-
-    # Assign splats to tiles.
-    # Ideally I'd spawn a thread per splat, and add its index to the arrays for relevant tiles.
-    # But this isn't doable in JAX. For now I'll make a giant boolean array and cumsum it to get
-    # id slots. But this will use a lot of memory so I might have to do it in chunks.
-    # ...
-
-    # n_subset = 16
-    # means = points_proj[:n_subset, :2]
-    # variances = screen_splat_radii[:n_subset]**2
-
-    # Per-tile sort would be here... Probably not necessary as long as my splats are all aligned.
-
-    # Render each tile. Vmap or loop?
-    means = points_proj[:, :2]
-    variances = screen_splat_radii**2
-    image_rgba = splat_tile(tile_size, tile_view_bounds, means, variances)
-    print("image rgba", image_rgba)
-    image_rgb = image_rgba[..., :3]
-
-    return mask, image_rgb
+    return image_rgb, n_tile_splats, tile_splats
 
 
 class PointCloudVis:
@@ -483,8 +491,7 @@ def main():
     splat_size = 0.001
     tile_size = (16, 16)
     n_tiles = (2, 2)
-    # mask, image = render_splats(
-    render_splats(
+    image, n_tile_splats, tile_splats = render_splats(
         tile_size,
         n_tiles,
         ground_points,
@@ -496,16 +503,18 @@ def main():
         far,
         splat_size,
     )
-    # print(image.shape)
-    # print(jnp.min(image, axis=(0, 1)))
-    # print(jnp.max(image, axis=(0, 1)))
-    # image_path = "test.png"
-    # print(f"Saving to {image_path}")
-    # write_array_as_image(image, image_path)
+    print(image.shape)
+    print(jnp.min(image, axis=(0, 1)))
+    print(jnp.max(image, axis=(0, 1)))
+    image_path = "test.png"
+    print(f"Saving to {image_path}")
+    write_array_as_image(image, image_path)
 
-    # ground_points = ground_points[mask]
-    # vis = PointCloudVis(ground_points, tree_points)
-    # vis.run()
+    print(tile_splats[2, :n_tile_splats[2]])
+    tile_splat_ids = tile_splats[2, :n_tile_splats[2]]
+    ground_points = ground_points[tile_splat_ids]
+    vis = PointCloudVis(ground_points, tree_points)
+    vis.run()
 
 
 if __name__ == "__main__":
