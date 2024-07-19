@@ -174,6 +174,7 @@ pair_splats_and_tiles = jax.vmap(
 )
 
 
+@partial(jax.jit, static_argnums=(0,))
 def splat_tile(
     # 16 x 16 in Kerbl et. al "3D Gaussian Splatting..." (2023)
     tile_size: tuple[int, int],
@@ -195,8 +196,6 @@ def splat_tile(
     pixel_y = jnp.linspace(
         tile_bounds[0, 1], tile_bounds[1, 1], tile_size[1], endpoint=False
     )
-    print(pixel_x.shape, pixel_x)
-    print(pixel_y.shape, pixel_y)
     pixel_x = pixel_x + 0.5 * pixel_size[0]
     pixel_y = pixel_y + 0.5 * pixel_size[1]
     pixel_x, pixel_y = jnp.meshgrid(pixel_x, pixel_y, indexing="ij")
@@ -373,13 +372,13 @@ def render_splats(
     n_processed_splats, image_rgb = splat_tile(
         # 16 x 16 in Kerbl et. al "3D Gaussian Splatting..." (2023)
         tile_size,
-        tile_bounds[2],  # [[x_min, y_min], [x_max, y_max]] in the projection plane
+        tile_bounds[0],  # [[x_min, y_min], [x_max, y_max]] in the projection plane
         points,  # shape (max_splats, 2), in world space
         viewer_xyz,
         viewer_frame,
         splat_radius,  # scalar
-        n_tile_splats[2],  # scalar
-        tile_splats[2],
+        n_tile_splats[0],  # scalar
+        tile_splats[0],
     )
     print(f"n processed splats: {n_processed_splats}")
 
