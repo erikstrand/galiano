@@ -174,7 +174,6 @@ pair_splats_and_tiles = jax.vmap(
 )
 
 
-@partial(jax.jit, static_argnums=(0,))
 def splat_tile(
     # 16 x 16 in Kerbl et. al "3D Gaussian Splatting..." (2023)
     tile_size: tuple[int, int],
@@ -275,6 +274,28 @@ splat_tiles = jax.vmap(
 )
 
 
+def merge_tiles(n_tiles, tile_rgba):
+    tile_x = np.arange(n_tiles[0])
+    tile_y = np.arange(n_tiles[1])
+    tile_x, tile_y = np.meshgrid(tile_x, tile_y, indexing="ij")
+    tile_xy = np.stack([tile_x, tile_y], axis=-1)
+    assert tile_xy.shape == (n_tiles[0], n_tiles[1], 2)
+    tile_xy = np.reshape(tile_xy, (-1, 2))
+
+    tile_size = tile_rgba.shape[1:3]
+    n_pixels_x = tile_size[0] * n_tiles[0]
+    n_pixels_y = tile_size[1] * n_tiles[1]
+    result = np.zeros((n_pixels_x, n_pixels_y, 4), dtype=np.float32)
+    for idx, (x, y) in enumerate(tile_xy):
+        x_start = x * tile_size[0]
+        x_end = x_start + tile_size[0]
+        y_start = y * tile_size[1]
+        y_end = y_start + tile_size[1]
+        result[x_start:x_end, y_start:y_end] = tile_rgba[idx]
+
+    return result
+
+
 def render_splats(
     tile_size: tuple[int, int],
     n_tiles: tuple[int, int],
@@ -302,6 +323,8 @@ def render_splats(
     Finally we render each tile. For each tile, this involves a lot of math for each splat in the
     tile's buffer.
     """
+    points = jnp.asarray(points)
+
     print("Collecting visible splats...")
     visible_splat_capacity = 500_000
     n_visible_splats, splat_ids = collect_visible_splats(
@@ -369,20 +392,23 @@ def render_splats(
 
     # Render each tile.
     print("Rendering tiles...")
-    n_processed_splats, image_rgb = splat_tile(
-        # 16 x 16 in Kerbl et. al "3D Gaussian Splatting..." (2023)
+    n_processed_splats, image_rgb = splat_tiles(
         tile_size,
-        tile_bounds[0],  # [[x_min, y_min], [x_max, y_max]] in the projection plane
+        tile_bounds,  # [[x_min, y_min], [x_max, y_max]] in the projection plane
         points,  # shape (max_splats, 2), in world space
         viewer_xyz,
         viewer_frame,
         splat_radius,  # scalar
-        n_tile_splats[0],  # scalar
-        tile_splats[0],
+        n_tile_splats,  # scalar
+        tile_splats,
     )
     print(f"n processed splats: {n_processed_splats}")
+    print("")
 
-    return image_rgb, n_tile_splats, tile_splats
+    print("Merging tiles...")
+    image = merge_tiles(n_tiles, image_rgb)
+
+    return image, n_visible_splats, splat_ids
 
 
 class PointCloudVis:
@@ -489,8 +515,8 @@ def main():
     far = 10.0
     splat_size = 0.001
     tile_size = (16, 16)
-    n_tiles = (2, 2)
-    image, n_tile_splats, tile_splats = render_splats(
+    n_tiles = (4, 4)
+    image, n_visible_splats, splat_ids = render_splats(
         tile_size,
         n_tiles,
         ground_points,
@@ -509,9 +535,7 @@ def main():
     print(f"Saving to {image_path}")
     write_array_as_image(image, image_path)
 
-    print(tile_splats[2, :n_tile_splats[2]])
-    tile_splat_ids = tile_splats[2, :n_tile_splats[2]]
-    ground_points = ground_points[tile_splat_ids]
+    ground_points = ground_points[splat_ids]
     vis = PointCloudVis(ground_points, tree_points)
     vis.run()
 
