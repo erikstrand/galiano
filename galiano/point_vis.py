@@ -54,6 +54,7 @@ def signed_distance_point_to_line(point, line_point, line_direction):
     return signed_distance
 
 
+@partial(jax.jit, static_argnums=(0,))
 def collect_visible_splats(
     splat_capacity,
     points,
@@ -168,10 +169,13 @@ def identify_splats_that_intersect_tile(
     return n_intersecting_splats, tile_splats
 
 
-pair_splats_and_tiles = jax.vmap(
-    identify_splats_that_intersect_tile,
-    in_axes=(None, None, None, None, None, None, 0, 0, 0),
-    out_axes=(0, 0),
+pair_splats_and_tiles = jax.jit(
+    jax.vmap(
+        identify_splats_that_intersect_tile,
+        in_axes=(None, None, None, None, None, None, 0, 0, 0),
+        out_axes=(0, 0),
+    ),
+    donate_argnums=(8,),
 )
 
 
@@ -270,8 +274,11 @@ def splat_tile(
     return n_processed_splats, rgba_buffer
 
 
-splat_tiles = jax.vmap(
-    splat_tile, in_axes=(None, 0, None, None, None, None, 0, 0), out_axes=(0, 0)
+splat_tiles = jax.jit(
+    jax.vmap(
+        splat_tile, in_axes=(None, 0, None, None, None, None, 0, 0), out_axes=(0, 0)
+    ),
+    static_argnums=(0,),
 )
 
 
