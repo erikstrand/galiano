@@ -53,9 +53,131 @@ def signed_distance_point_to_line(point, line_point, line_direction):
     return signed_distance
 
 
+def collect_visible_splats(
+    splat_capacity,
+    points,
+    viewer_xyz,
+    viewer_frame,
+    viewer_fov_x,
+    viewer_fov_y,
+    near,
+    far,
+    splat_radius,
+):
+    """
+    This method returns the number of visible splats and the ids of the visible splats.
+
+    In order for all arrays to be statically shaped, the list of splat ids always has shape
+    (splat_capacity,). All visible splat ids are at the beginning of the array (the rest of the
+    array is filled with zeros).
+    """
+
+    n_points = points.shape[0]
+
+    # Convert points to camera space.
+    points = jnp.einsum("ij,kj->ki", viewer_frame, points - viewer_xyz)
+
+    # Project points to the image plane.
+    zs = points[:, 2][:, None]
+    points_proj = jnp.concatenate([points[:, :2] / zs, zs], axis=1)
+
+    # Compute splat size in the image plane. For now I'm assuming the splats are still circular
+    # after projection to the screen, which is approximately true if they are all aligned with the
+    # view direction. Later I should model the screen space splats as ellipses.
+    splat_radii_proj = splat_radius / points_proj[:, 2]
+
+    # Clip based on z.
+    z_mask = jnp.logical_and(points_proj[:, 2] >= near, points_proj[:, 2] <= far)
+
+    # Clip based on visibility.
+    fov_bound_x = jnp.tan(0.5 * viewer_fov_x)
+    fov_bound_y = jnp.tan(0.5 * viewer_fov_y)
+    x_mask = jnp.logical_and(
+        points_proj[:, 0] >= -fov_bound_x - splat_radii_proj,
+        points_proj[:, 0] <= fov_bound_x + splat_radii_proj,
+    )
+    y_mask = jnp.logical_and(
+        points_proj[:, 1] >= -fov_bound_y - splat_radii_proj,
+        points_proj[:, 1] <= fov_bound_y + splat_radii_proj,
+    )
+    xy_mask = jnp.logical_and(x_mask, y_mask)
+
+    # Combine masks.
+    mask = jnp.logical_and(z_mask, xy_mask)
+    assert mask.shape == (n_points,)
+
+    # Collect ids of visible splats.
+    splat_slots = jnp.cumsum(mask, axis=0)
+    n_visible_splats = splat_slots[-1]
+    splat_slots = jnp.where(mask, splat_slots - 1, splat_capacity)
+    splat_ids = jnp.zeros(n_points, dtype=jnp.uint32)
+    splat_ids = splat_ids.at[splat_slots].set(
+        jnp.arange(n_points, dtype=jnp.uint32), mode="drop"
+    )
+    return n_visible_splats, splat_ids
+
+
+def identify_splats_that_intersect_tile(
+    points,  # point xyz in world space
+    viewer_xyz,
+    viewer_frame,
+    splat_radius,
+    n_visible_splats,  # scalar, the number of valid splat ids in visible_splat_ids
+    visible_splat_ids,  # shape (max_visible_splats,), ids of visible splats
+    tile_bounds,  # shape (2, 2): [[x_min, y_min], [x_max, y_max]]
+    n_tile_splats,  # scalar, the number of splats already intersected with this tile
+    tile_splats,  # shape (capacity,), ids of splats in this tile
+):
+    n_points = points.shape[0]
+    max_visible_splats = visible_splat_ids.shape[0]
+    max_splats_per_tile = tile_splats.shape[0]
+
+    splat_mask = jnp.arange(n_points) < n_visible_splats
+    splat_xyz = points[visible_splat_ids]
+
+    # Convert points to camera space.
+    splat_xyz = jnp.einsum("ij,kj->ki", viewer_frame, splat_xyz - viewer_xyz)
+
+    # Project points to the image plane.
+    zs = splat_xyz[:, 2][:, None]
+    splat_xyz_proj = jnp.concatenate([splat_xyz[:, :2] / zs, zs], axis=1)
+
+    # Compute splat size in the image plane. For now I'm assuming the splats are still circular
+    # after projection to the screen, which is approximately true if they are all aligned with the
+    # view direction. Later I should model the screen space splats as ellipses.
+    splat_radii_proj = splat_radius / splat_xyz_proj[:, 2]
+
+    # Determine which splats intersect this tile.
+    # We express this as a boolean mask for visible_splat_ids.
+    x_min_cond = splat_xyz_proj[:, 0] >= tile_bounds[0, 0] - splat_radii_proj
+    x_max_cond = splat_xyz_proj[:, 0] <= tile_bounds[1, 0] + splat_radii_proj
+    y_min_cond = splat_xyz_proj[:, 1] >= tile_bounds[0, 1] - splat_radii_proj
+    y_max_cond = splat_xyz_proj[:, 1] <= tile_bounds[1, 1] + splat_radii_proj
+    x_overlap = jnp.logical_and(x_min_cond, x_max_cond)
+    y_overlap = jnp.logical_and(y_min_cond, y_max_cond)
+    mask = jnp.logical_and(x_overlap, y_overlap)
+    assert mask.shape == (max_visible_splats,)
+
+    # Collect the ids of splats that intersect this tile.
+    splat_slots = jnp.cumsum(mask)
+    n_intersecting_splats = splat_slots[-1]
+    splat_slots = jnp.where(mask, splat_slots + n_tile_splats - 1, max_splats_per_tile)
+    tile_splats = tile_splats.at[splat_slots].set(visible_splat_ids, mode="drop")
+    return n_intersecting_splats, tile_splats
+
+
+pair_splats_and_tiles = jax.vmap(
+    identify_splats_that_intersect_tile,
+    in_axes=(None, None, None, None, None, None, 0, 0, 0),
+    out_axes=(0, 0),
+)
+
+
 @partial(jax.jit, static_argnums=(0,))
 def splat_tile(
-    tile_size: tuple[int, int], # 16 x 16 in Kerbl et. al "3D Gaussian Splatting..." (2023)
+    tile_size: tuple[
+        int, int
+    ],  # 16 x 16 in Kerbl et. al "3D Gaussian Splatting..." (2023)
     tile_bounds: jax.Array,  # [[x_min, y_min], [x_max, y_max]] in the projection plane
     means: jax.Array,  # shape (max_splats, 2), in projected space
     variances: jax.Array,  # shape (max_splats,), in projected space
@@ -141,6 +263,21 @@ def render_splats(
     far,
     splat_radius,
 ):
+    print("Collecting visible splats...")
+    visible_splat_capacity = 600_000
+    n_visible_splats, splat_ids = collect_visible_splats(
+        visible_splat_capacity,
+        points,
+        viewer_xyz,
+        viewer_frame,
+        viewer_fov_x,
+        viewer_fov_y,
+        near,
+        far,
+        splat_radius,
+    )
+    print(f"{n_visible_splats} visible splats")
+
     # Compute tile bounds (in the image plane i.e. z = 1).
     fov_bound_x = jnp.tan(0.5 * viewer_fov_x)
     fov_bound_y = jnp.tan(0.5 * viewer_fov_y)
@@ -150,8 +287,43 @@ def render_splats(
             [fov_bound_x, fov_bound_y],
         ]
     )
-    tile_plane_x = jnp.linspace(tile_view_bounds[0, 0], tile_view_bounds[1, 0], n_tiles[0] + 1)
-    tile_plane_y = jnp.linspace(tile_view_bounds[0, 1], tile_view_bounds[1, 1], n_tiles[1] + 1)
+    tile_bounds_x = jnp.linspace(
+        tile_view_bounds[0, 0], tile_view_bounds[1, 0], n_tiles[0] + 1
+    )
+    tile_bounds_y = jnp.linspace(
+        tile_view_bounds[0, 1], tile_view_bounds[1, 1], n_tiles[1] + 1
+    )
+    low_x, low_y = jnp.meshgrid(tile_bounds_x[:-1], tile_bounds_y[:-1], indexing="ij")
+    high_x, high_y = jnp.meshgrid(tile_bounds_x[1:], tile_bounds_y[1:], indexing="ij")
+    low = jnp.stack([low_x, low_y], axis=-1)
+    high = jnp.stack([high_x, high_y], axis=-1)
+    tile_bounds = jnp.stack([low, high], axis=2)
+    # The last two axes are min/max, x/y.
+    assert tile_bounds.shape == (n_tiles[0], n_tiles[1], 2, 2)
+    tile_bounds = jnp.reshape(tile_bounds, (-1, 2, 2))
+
+    print("Pairing splats and tiles...")
+    n_tiles_total = n_tiles[0] * n_tiles[1]
+    n_tile_splats = jnp.zeros((n_tiles_total,), dtype=jnp.uint32)
+    max_splats_per_tile = 200_000
+    tile_splats = jnp.zeros((n_tiles_total, max_splats_per_tile), dtype=jnp.uint32)
+    n_intersecting_splats, tile_splats = pair_splats_and_tiles(
+        points,
+        viewer_xyz,
+        viewer_frame,
+        splat_radius,
+        n_visible_splats,
+        splat_ids,
+        tile_bounds,
+        n_tile_splats,
+        tile_splats,
+    )
+    print(f"n intersecting splats: {n_intersecting_splats}")
+    print("intersecting splat ids", tile_splats)
+    for tile_idx in range(4):
+        print(tile_bounds[tile_idx])
+    print("")
+    return
 
     # Convert points to camera space.
     points = jnp.einsum("ij,kj->ki", viewer_frame, points - viewer_xyz)
@@ -281,8 +453,6 @@ def main():
     print(f"n bins: {bin_def.n_bins}, total bins: {bin_def.n_total_bins}")
     print(f"bin size: {bin_def.bin_size}")
     print(f"max bin occupancy: {jnp.max(spatial_sort.bin_counts)}")
-    print(spatial_sort.positions.shape)
-    print(spatial_sort.bins.shape)
     print("")
 
     # Define the viewer position.
@@ -311,9 +481,10 @@ def main():
     near = 0.001
     far = 10.0
     splat_size = 0.001
-    tile_size = (32, 32)
+    tile_size = (16, 16)
     n_tiles = (2, 2)
-    mask, image = render_splats(
+    # mask, image = render_splats(
+    render_splats(
         tile_size,
         n_tiles,
         ground_points,
@@ -325,12 +496,12 @@ def main():
         far,
         splat_size,
     )
-    print(image.shape)
-    print(jnp.min(image, axis=(0, 1)))
-    print(jnp.max(image, axis=(0, 1)))
-    image_path = "test.png"
-    print(f"Saving to {image_path}")
-    write_array_as_image(image, image_path)
+    # print(image.shape)
+    # print(jnp.min(image, axis=(0, 1)))
+    # print(jnp.max(image, axis=(0, 1)))
+    # image_path = "test.png"
+    # print(f"Saving to {image_path}")
+    # write_array_as_image(image, image_path)
 
     # ground_points = ground_points[mask]
     # vis = PointCloudVis(ground_points, tree_points)
