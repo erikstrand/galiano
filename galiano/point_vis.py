@@ -534,12 +534,6 @@ def main():
         ]
     )
 
-    # For now I just have one tile.
-    image_size = (16, 16)
-    aspect_ratio = image_size[1] / image_size[0]
-    viewer_fov_x = 60.0 * (jnp.pi / 180.0)
-    viewer_fov_y = viewer_fov_x * aspect_ratio
-
     print("Building splats...")
     ground_color = np.array([0.5, 0.2, 0.1, 1.0])
     tree_color = np.array([0.1, 0.6, 0.2, 1.0])
@@ -571,8 +565,12 @@ def main():
     far = 10.0
     splat_size = 0.001
     tile_size = (16, 16)
-    n_tiles = (32, 32)
+    n_tiles = (32, 28)
     cutoff = 3.0
+    image_size = (tile_size[0] * n_tiles[0], tile_size[1] * n_tiles[1])
+    aspect_ratio = image_size[1] / image_size[0]
+    viewer_fov_x = 60.0 * (jnp.pi / 180.0)
+    viewer_fov_y = viewer_fov_x * aspect_ratio
     image, n_visible_splats, splat_ids = render_splats(
         tile_size,
         n_tiles,
